@@ -87,6 +87,6 @@ pub use validate_order::validate_order;
 mod test_support;
 
 pub use daily::{
-    DailyActivity, DailyCandidate, DailyChoice, DailyContext, DailyKind, DailySelection,
-    DailySession, daily_rank,
+    DailyActivity, DailyCandidate, DailyChoice, DailyContext, DailyEvidence, DailyKind,
+    DailySelection, DailySession, daily_rank,
 };
