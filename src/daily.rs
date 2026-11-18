@@ -33,6 +33,10 @@ pub struct DailyChoice {
 pub struct DailySelection {
     pub next: Option<DailyChoice>,
     pub outstanding: usize,
+    pub due_count: usize,
+    pub reteach_count: usize,
+    pub repertoire_admitted: usize,
+    pub tactics_admitted: usize,
     pub repertoire_remaining: usize,
     pub tactics_remaining: usize,
     pub practice: Option<DailyChoice>,
@@ -202,6 +206,8 @@ impl DailySession {
                 && !tactics.contains(&active)
                 && !frontiers.iter().any(|(target, _)| *target == active)
         });
+        let due_count = due.len();
+        let reteach_count = reteach.len();
         let outstanding = usize::from(active_only)
             + due.len()
             + reteach.len()
@@ -306,6 +312,10 @@ impl DailySession {
         DailySelection {
             next,
             outstanding,
+            due_count,
+            reteach_count,
+            repertoire_admitted: admitted.0,
+            tactics_admitted: admitted.1,
             repertoire_remaining,
             tactics_remaining,
             practice,
