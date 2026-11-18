@@ -50,6 +50,13 @@ pub struct DailyContext {
     pub tactics_limit: usize,
 }
 
+/// Evidence facts projected by the daily application from current Learning.
+#[derive(Default)]
+pub struct DailyEvidence {
+    pub requested_tests: BTreeSet<TargetId>,
+    pub teaching_targets: BTreeSet<TargetId>,
+}
+
 #[derive(Default)]
 pub struct DailySession {
     day: Option<StudyDay>,
@@ -143,6 +150,30 @@ impl DailySession {
         new_order: Option<&BTreeMap<TargetId, usize>>,
         capture_priority: &BTreeMap<TargetId, u64>,
     ) -> DailySelection {
+        self.select_with_evidence(
+            context,
+            candidates,
+            routes,
+            admitted,
+            required_activity,
+            new_order,
+            capture_priority,
+            &DailyEvidence::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_with_evidence(
+        &self,
+        context: DailyContext,
+        candidates: &BTreeMap<TargetId, DailyCandidate>,
+        routes: &[Line],
+        admitted: (usize, usize),
+        required_activity: Option<&TargetId>,
+        new_order: Option<&BTreeMap<TargetId, usize>>,
+        capture_priority: &BTreeMap<TargetId, u64>,
+        evidence: &DailyEvidence,
+    ) -> DailySelection {
         let repertoire_remaining = context.repertoire_limit.saturating_sub(admitted.0);
         let tactics_remaining = context.tactics_limit.saturating_sub(admitted.1);
         let available =
@@ -162,7 +193,9 @@ impl DailySession {
                     unseen_tactics |= eligible_new && candidate.first_introduced.is_none();
                 }
             }
-            if candidate.due.is_some_and(|day| day <= context.today) {
+            if candidate.due.is_some_and(|day| day <= context.today)
+                || evidence.requested_tests.contains(id)
+            {
                 due.push(id);
             } else if !candidate.introduced_this_version {
                 match (
@@ -189,22 +222,26 @@ impl DailySession {
                     })
                     .filter(|id| candidates[*id].first_introduced.is_none())
                 {
-                    frontiers.push((id, &route.id));
+                    let relevant = route
+                        .targets
+                        .iter()
+                        .any(|target| evidence.teaching_targets.contains(target));
+                    frontiers.push((id, &route.id, relevant));
                 }
             }
         }
-        frontiers.sort_by_key(|(_, route)| *route);
+        frontiers.sort_by_key(|(_, route, _)| *route);
 
         let frontier_count = frontiers
             .iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _, _)| *id)
             .collect::<BTreeSet<_>>()
             .len();
         let active_only = required_activity.is_some_and(|active| {
             !due.contains(&active)
                 && !reteach.contains(&active)
                 && !tactics.contains(&active)
-                && !frontiers.iter().any(|(target, _)| *target == active)
+                && !frontiers.iter().any(|(target, _, _)| *target == active)
         });
         let due_count = due.len();
         let reteach_count = reteach.len();
@@ -224,6 +261,7 @@ impl DailySession {
             .filter(|id| available(id))
             .min_by_key(|id| {
                 (
+                    !evidence.requested_tests.contains(*id),
                     capture_priority
                         .get(*id)
                         .map(|time| (0, std::cmp::Reverse(*time)))
@@ -252,14 +290,20 @@ impl DailySession {
                 .last_route
                 .as_ref()
                 .filter(|_| self.day == Some(context.today))
-                .map_or(0, |route| frontiers.partition_point(|(_, id)| *id <= route));
-            let repertoire = frontiers
+                .map_or(0, |route| {
+                    frontiers.partition_point(|(_, id, _)| *id <= route)
+                });
+            let rotated_frontiers = frontiers
                 .iter()
                 .cycle()
                 .skip(rotated)
                 .take(frontiers.len())
-                .find(|(id, _)| available(id))
-                .map(|(id, route)| DailyChoice {
+                .filter(|(id, _, _)| available(id));
+            let repertoire = rotated_frontiers
+                .clone()
+                .find(|(_, _, relevant)| *relevant)
+                .or_else(|| rotated_frontiers.into_iter().next())
+                .map(|(id, route, _)| DailyChoice {
                     target: (*id).clone(),
                     activity: DailyActivity::Teach,
                     route: Some((*route).clone()),
