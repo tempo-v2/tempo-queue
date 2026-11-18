@@ -19,6 +19,7 @@ pub struct DailyCandidate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DailyActivity {
     Teach,
+    Repair,
     Test,
     Practice,
 }
@@ -34,6 +35,7 @@ pub struct DailySelection {
     pub next: Option<DailyChoice>,
     pub outstanding: usize,
     pub due_count: usize,
+    pub corrective_recalls_remaining: usize,
     pub reteach_count: usize,
     pub repertoire_admitted: usize,
     pub tactics_admitted: usize,
@@ -54,7 +56,8 @@ pub struct DailyContext {
 #[derive(Default)]
 pub struct DailyEvidence {
     pub requested_tests: BTreeSet<TargetId>,
-    pub teaching_targets: BTreeSet<TargetId>,
+    pub repair_targets: BTreeSet<TargetId>,
+    pub corrective_recalls_remaining: usize,
 }
 
 #[derive(Default)]
@@ -185,6 +188,7 @@ impl DailySession {
             |id: &TargetId| self.day != Some(context.today) || !self.deferred.contains(id);
         let rank = |id: &TargetId| daily_rank(context.seed, context.today, id);
         let mut due = Vec::new();
+        let mut repairs = Vec::new();
         let mut reteach = Vec::new();
         let mut tactics = Vec::new();
         let mut practiced = Vec::new();
@@ -198,7 +202,9 @@ impl DailySession {
                     unseen_tactics |= eligible_new && candidate.first_introduced.is_none();
                 }
             }
-            if candidate.due.is_some_and(|day| day <= context.today)
+            if evidence.repair_targets.contains(id) {
+                repairs.push(id);
+            } else if candidate.due.is_some_and(|day| day <= context.today)
                 || evidence.requested_tests.contains(id)
             {
                 due.push(id);
@@ -227,30 +233,28 @@ impl DailySession {
                     })
                     .filter(|id| candidates[*id].first_introduced.is_none())
                 {
-                    let relevant = route
-                        .targets
-                        .iter()
-                        .any(|target| evidence.teaching_targets.contains(target));
-                    frontiers.push((id, &route.id, relevant));
+                    frontiers.push((id, &route.id));
                 }
             }
         }
-        frontiers.sort_by_key(|(_, route, _)| *route);
+        frontiers.sort_by_key(|(_, route)| *route);
 
         let frontier_count = frontiers
             .iter()
-            .map(|(id, _, _)| *id)
+            .map(|(id, _)| *id)
             .collect::<BTreeSet<_>>()
             .len();
         let active_only = required_activity.is_some_and(|active| {
-            !due.contains(&active)
+            !repairs.contains(&active)
+                && !due.contains(&active)
                 && !reteach.contains(&active)
                 && !tactics.contains(&active)
-                && !frontiers.iter().any(|(target, _, _)| *target == active)
+                && !frontiers.iter().any(|(target, _)| *target == active)
         });
         let due_count = due.len();
         let reteach_count = reteach.len();
         let outstanding = usize::from(active_only)
+            + repairs.len()
             + due.len()
             + reteach.len()
             + frontier_count.min(repertoire_remaining)
@@ -276,7 +280,14 @@ impl DailySession {
                 )
             })
             .cloned();
-        let next = if let Some(target) = next_due {
+        let next = if let Some(target) = first(repairs) {
+            Some(DailyChoice {
+                target,
+                activity: DailyActivity::Repair,
+                route: None,
+                new_kind: None,
+            })
+        } else if let Some(target) = next_due {
             Some(DailyChoice {
                 target,
                 activity: DailyActivity::Test,
@@ -295,20 +306,17 @@ impl DailySession {
                 .last_route
                 .as_ref()
                 .filter(|_| self.day == Some(context.today))
-                .map_or(0, |route| {
-                    frontiers.partition_point(|(_, id, _)| *id <= route)
-                });
+                .map_or(0, |route| frontiers.partition_point(|(_, id)| *id <= route));
             let rotated_frontiers = frontiers
                 .iter()
                 .cycle()
                 .skip(rotated)
                 .take(frontiers.len())
-                .filter(|(id, _, _)| available(id));
+                .filter(|(id, _)| available(id));
             let repertoire = rotated_frontiers
-                .clone()
-                .find(|(_, _, relevant)| *relevant)
-                .or_else(|| rotated_frontiers.into_iter().next())
-                .map(|(id, route, _)| DailyChoice {
+                .into_iter()
+                .next()
+                .map(|(id, route)| DailyChoice {
                     target: (*id).clone(),
                     activity: DailyActivity::Teach,
                     route: Some((*route).clone()),
@@ -359,6 +367,7 @@ impl DailySession {
             new_kind: None,
         });
         DailySelection {
+            corrective_recalls_remaining: evidence.corrective_recalls_remaining,
             next,
             outstanding,
             due_count,
