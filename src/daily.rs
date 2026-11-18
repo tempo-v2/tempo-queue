@@ -56,6 +56,7 @@ pub struct DailyContext {
 #[derive(Default)]
 pub struct DailyEvidence {
     pub requested_tests: BTreeSet<TargetId>,
+    pub teaching_targets: BTreeSet<TargetId>,
     pub repair_targets: BTreeSet<TargetId>,
     pub corrective_recalls_remaining: usize,
 }
@@ -233,15 +234,20 @@ impl DailySession {
                     })
                     .filter(|id| candidates[*id].first_introduced.is_none())
                 {
-                    frontiers.push((id, &route.id));
+                    let relevant = !evidence.teaching_targets.is_empty()
+                        && route
+                            .targets
+                            .iter()
+                            .any(|target| evidence.teaching_targets.contains(target));
+                    frontiers.push((id, &route.id, relevant));
                 }
             }
         }
-        frontiers.sort_by_key(|(_, route)| *route);
+        frontiers.sort_by_key(|(_, route, _)| *route);
 
         let frontier_count = frontiers
             .iter()
-            .map(|(id, _)| *id)
+            .map(|(id, _, _)| *id)
             .collect::<BTreeSet<_>>()
             .len();
         let active_only = required_activity.is_some_and(|active| {
@@ -249,7 +255,7 @@ impl DailySession {
                 && !due.contains(&active)
                 && !reteach.contains(&active)
                 && !tactics.contains(&active)
-                && !frontiers.iter().any(|(target, _)| *target == active)
+                && !frontiers.iter().any(|(target, _, _)| *target == active)
         });
         let due_count = due.len();
         let reteach_count = reteach.len();
@@ -306,17 +312,20 @@ impl DailySession {
                 .last_route
                 .as_ref()
                 .filter(|_| self.day == Some(context.today))
-                .map_or(0, |route| frontiers.partition_point(|(_, id)| *id <= route));
+                .map_or(0, |route| {
+                    frontiers.partition_point(|(_, id, _)| *id <= route)
+                });
             let rotated_frontiers = frontiers
                 .iter()
                 .cycle()
                 .skip(rotated)
                 .take(frontiers.len())
-                .filter(|(id, _)| available(id));
+                .filter(|(id, _, _)| available(id));
             let repertoire = rotated_frontiers
-                .into_iter()
-                .next()
-                .map(|(id, route)| DailyChoice {
+                .clone()
+                .find(|(_, _, relevant)| *relevant)
+                .or_else(|| rotated_frontiers.into_iter().next())
+                .map(|(id, route, _)| DailyChoice {
                     target: (*id).clone(),
                     activity: DailyActivity::Teach,
                     route: Some((*route).clone()),
