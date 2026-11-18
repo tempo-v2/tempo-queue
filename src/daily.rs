@@ -81,6 +81,11 @@ impl DailySession {
         self.deferred.insert(target);
     }
 
+    /// A reset removes this target's skip without resuming other skipped work.
+    pub fn clear_deferral(&mut self, target: &TargetId) {
+        self.deferred.remove(target);
+    }
+
     pub fn resume_skipped(&mut self) {
         self.deferred.clear();
     }
