@@ -96,6 +96,49 @@ impl DailySession {
         admitted: (usize, usize),
         required_activity: Option<&TargetId>,
     ) -> DailySelection {
+        self.select_with_tactics(
+            context,
+            candidates,
+            routes,
+            admitted,
+            required_activity,
+            None,
+        )
+    }
+
+    pub fn select_with_tactics(
+        &self,
+        context: DailyContext,
+        candidates: &BTreeMap<TargetId, DailyCandidate>,
+        routes: &[Line],
+        admitted: (usize, usize),
+        required_activity: Option<&TargetId>,
+        new_order: Option<&BTreeMap<TargetId, usize>>,
+    ) -> DailySelection {
+        self.select_with_capture_priority(
+            context,
+            candidates,
+            routes,
+            admitted,
+            required_activity,
+            new_order,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// A supplied order both restricts and ranks new tactics. Reviews and practice
+    /// still use the full candidate set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_with_capture_priority(
+        &self,
+        context: DailyContext,
+        candidates: &BTreeMap<TargetId, DailyCandidate>,
+        routes: &[Line],
+        admitted: (usize, usize),
+        required_activity: Option<&TargetId>,
+        new_order: Option<&BTreeMap<TargetId, usize>>,
+        capture_priority: &BTreeMap<TargetId, u64>,
+    ) -> DailySelection {
         let repertoire_remaining = context.repertoire_limit.saturating_sub(admitted.0);
         let tactics_remaining = context.tactics_limit.saturating_sub(admitted.1);
         let available =
@@ -107,11 +150,12 @@ impl DailySession {
         let mut practiced = Vec::new();
         let mut unseen_tactics = false;
         for (id, candidate) in candidates {
+            let eligible_new = new_order.is_none_or(|order| order.contains_key(id));
             if candidate.kind == DailyKind::Tactic {
                 if candidate.introduced_this_version {
                     practiced.push(id);
                 } else {
-                    unseen_tactics |= candidate.first_introduced.is_none();
+                    unseen_tactics |= eligible_new && candidate.first_introduced.is_none();
                 }
             }
             if candidate.due.is_some_and(|day| day <= context.today) {
@@ -123,7 +167,7 @@ impl DailySession {
                     tactics_remaining,
                 ) {
                     (DailyKind::Repertoire, Some(_), _) => reteach.push(id),
-                    (DailyKind::Tactic, None, n) if n > 0 => tactics.push(id),
+                    (DailyKind::Tactic, None, n) if n > 0 && eligible_new => tactics.push(id),
                     _ => {}
                 }
             }
@@ -169,7 +213,21 @@ impl DailySession {
                 .min_by_key(|id| (rank(id), *id))
                 .cloned()
         };
-        let next = if let Some(target) = first(due) {
+        let next_due = due
+            .into_iter()
+            .filter(|id| available(id))
+            .min_by_key(|id| {
+                (
+                    capture_priority
+                        .get(*id)
+                        .map(|time| (0, std::cmp::Reverse(*time)))
+                        .unwrap_or((1, std::cmp::Reverse(0))),
+                    rank(id),
+                    *id,
+                )
+            })
+            .cloned();
+        let next = if let Some(target) = next_due {
             Some(DailyChoice {
                 target,
                 activity: DailyActivity::Test,
@@ -201,7 +259,15 @@ impl DailySession {
                     route: Some((*route).clone()),
                     new_kind: Some(DailyKind::Repertoire),
                 });
-            let tactic = first(tactics).map(|target| DailyChoice {
+            let target = match new_order {
+                Some(order) => tactics
+                    .into_iter()
+                    .filter(|id| available(id))
+                    .min_by_key(|id| order[*id])
+                    .cloned(),
+                None => first(tactics),
+            };
+            let tactic = target.map(|target| DailyChoice {
                 target,
                 activity: DailyActivity::Test,
                 route: None,
