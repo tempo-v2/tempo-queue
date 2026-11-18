@@ -35,6 +35,8 @@ pub struct DailySelection {
     pub outstanding: usize,
     pub repertoire_remaining: usize,
     pub tactics_remaining: usize,
+    pub practice: Option<DailyChoice>,
+    pub unseen_tactics: bool,
 }
 
 pub struct DailyContext {
@@ -50,6 +52,7 @@ pub struct DailySession {
     deferred: BTreeSet<TargetId>,
     last_route: Option<String>,
     last_new: Option<DailyKind>,
+    last_practice: Option<TargetId>,
 }
 
 impl DailySession {
@@ -74,6 +77,9 @@ impl DailySession {
     /// Call after durable issuance succeeds.
     pub fn issued(&mut self, choice: &DailyChoice, day: StudyDay) {
         self.for_day(day);
+        if choice.activity == DailyActivity::Practice {
+            self.last_practice = Some(choice.target.clone());
+        }
         if let Some(route) = &choice.route {
             self.last_route = Some(route.clone());
         }
@@ -88,6 +94,7 @@ impl DailySession {
         candidates: &BTreeMap<TargetId, DailyCandidate>,
         routes: &[Line],
         admitted: (usize, usize),
+        required_activity: Option<&TargetId>,
     ) -> DailySelection {
         let repertoire_remaining = context.repertoire_limit.saturating_sub(admitted.0);
         let tactics_remaining = context.tactics_limit.saturating_sub(admitted.1);
@@ -97,7 +104,16 @@ impl DailySession {
         let mut due = Vec::new();
         let mut reteach = Vec::new();
         let mut tactics = Vec::new();
+        let mut practiced = Vec::new();
+        let mut unseen_tactics = false;
         for (id, candidate) in candidates {
+            if candidate.kind == DailyKind::Tactic {
+                if candidate.introduced_this_version {
+                    practiced.push(id);
+                } else {
+                    unseen_tactics |= candidate.first_introduced.is_none();
+                }
+            }
             if candidate.due.is_some_and(|day| day <= context.today) {
                 due.push(id);
             } else if !candidate.introduced_this_version {
@@ -136,7 +152,14 @@ impl DailySession {
             .map(|(id, _)| *id)
             .collect::<BTreeSet<_>>()
             .len();
-        let outstanding = due.len()
+        let active_only = required_activity.is_some_and(|active| {
+            !due.contains(&active)
+                && !reteach.contains(&active)
+                && !tactics.contains(&active)
+                && !frontiers.iter().any(|(target, _)| *target == active)
+        });
+        let outstanding = usize::from(active_only)
+            + due.len()
             + reteach.len()
             + frontier_count.min(repertoire_remaining)
             + tactics.len().min(tactics_remaining);
@@ -190,11 +213,37 @@ impl DailySession {
                 repertoire.or(tactic)
             }
         };
+        let last = self
+            .last_practice
+            .as_ref()
+            .filter(|_| self.day == Some(context.today));
+        let next_practice = last
+            .and_then(|id| {
+                let key = (rank(id), id);
+                practiced
+                    .iter()
+                    .copied()
+                    .filter(|target| (rank(target), *target) > key)
+                    .min_by_key(|target| (rank(target), *target))
+            })
+            .or_else(|| {
+                practiced
+                    .into_iter()
+                    .min_by_key(|target| (rank(target), *target))
+            });
+        let practice = next_practice.map(|target| DailyChoice {
+            target: target.clone(),
+            activity: DailyActivity::Practice,
+            route: None,
+            new_kind: None,
+        });
         DailySelection {
             next,
             outstanding,
             repertoire_remaining,
             tactics_remaining,
+            practice,
+            unseen_tactics,
         }
     }
 }
