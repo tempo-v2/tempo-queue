@@ -47,9 +47,11 @@
 
 mod block;
 mod candidate;
+mod daily;
 mod eligibility;
 mod eligibility_reason;
 mod eligible_target;
+
 mod group;
 mod line;
 mod order_event;
@@ -83,3 +85,8 @@ pub use validate_order::validate_order;
 
 #[cfg(test)]
 mod test_support;
+
+pub use daily::{
+    DailyActivity, DailyCandidate, DailyChoice, DailyContext, DailyKind, DailySelection,
+    DailySession, daily_rank,
+};
