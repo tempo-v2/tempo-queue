@@ -26,17 +26,17 @@ pub struct TacticPackCandidate<'a> {
 
 /// An absent preference is unrestricted. A present preference limits new
 /// admissions, with themes in the caller's canonical rotation order.
+/// Repeated theme IDs share the slot of their first occurrence.
 pub fn rank_new_tactics<'a>(
     candidates: impl IntoIterator<Item = TacticPackCandidate<'a>>,
     today: StudyDay,
     selected_themes: Option<&[&str]>,
 ) -> Option<BTreeMap<TargetId, usize>> {
-    let themes = selected_themes?
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, theme)| (theme, index))
-        .collect::<BTreeMap<_, _>>();
+    let mut themes = BTreeMap::new();
+    for &theme in selected_themes? {
+        let index = themes.len();
+        themes.entry(theme).or_insert(index);
+    }
     if themes.is_empty() {
         return Some(BTreeMap::new());
     }
@@ -137,6 +137,11 @@ mod tests {
         assert_eq!(
             rank_new_tactics(candidates(), StudyDay(1), selected).unwrap()[&second],
             0
+        );
+        let repeated = ["pin", "fork", "fork", "pin"];
+        assert_eq!(
+            day_zero,
+            rank_new_tactics(candidates(), StudyDay(0), Some(&repeated)).unwrap()
         );
     }
 }
