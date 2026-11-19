@@ -88,5 +88,5 @@ mod test_support;
 
 pub use daily::{
     DailyActivity, DailyCandidate, DailyChoice, DailyContext, DailyEvidence, DailyKind,
-    DailySelection, DailySession, daily_rank,
+    DailySelection, DailySession, RelevanceReason, TargetRelevance, daily_rank,
 };
