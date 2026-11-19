@@ -37,6 +37,8 @@ pub struct DailySelection {
     pub next: Option<DailyChoice>,
     pub outstanding: usize,
     pub due_count: usize,
+    /// Pending guided repairs, including the active target and session skips.
+    pub repairs_remaining: usize,
     pub corrective_recalls_remaining: usize,
     pub reteach_count: usize,
     pub repertoire_admitted: usize,
@@ -319,9 +321,10 @@ impl DailySession {
                 && !frontiers.iter().any(|(target, _, _, _)| *target == active)
         });
         let due_count = due.len();
+        let repairs_remaining = repairs.len();
         let reteach_count = reteach.len();
         let outstanding = usize::from(active_only)
-            + repairs.len()
+            + repairs_remaining
             + due.len()
             + reteach.len()
             + frontier_count.min(repertoire_remaining)
@@ -454,6 +457,7 @@ impl DailySession {
             next,
             outstanding,
             due_count,
+            repairs_remaining,
             reteach_count,
             repertoire_admitted: admitted.0,
             tactics_admitted: admitted.1,
