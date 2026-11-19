@@ -1,5 +1,6 @@
 //! Daily selection over projected target and route facts.
 use crate::Line;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use tempo_types::{StudyDay, TargetId};
 
@@ -29,6 +30,7 @@ pub struct DailyChoice {
     pub activity: DailyActivity,
     pub route: Option<String>,
     pub new_kind: Option<DailyKind>,
+    pub relevance: Option<RelevanceReason>,
 }
 
 pub struct DailySelection {
@@ -52,13 +54,41 @@ pub struct DailyContext {
     pub tactics_limit: usize,
 }
 
-/// Evidence facts projected by the daily application from current Learning.
+/// Relevance is an ordering input for work that is already eligible.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TargetRelevance {
+    pub exposure: u32,
+    pub misses: u32,
+    pub modeled_millionths: Option<u32>,
+    pub window_games: u32,
+}
+
+impl TargetRelevance {
+    fn rank(self) -> (u8, u32, u32) {
+        if self.exposure > 0 {
+            (2, self.exposure, self.misses)
+        } else if let Some(reach) = self.modeled_millionths {
+            (1, reach, 0)
+        } else {
+            (0, 0, 0)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RelevanceReason {
+    pub evidence: TargetRelevance,
+    pub downstream: bool,
+}
+
+/// Evidence facts projected by the daily application from Learning and Games.
 #[derive(Default)]
 pub struct DailyEvidence {
     pub requested_tests: BTreeSet<TargetId>,
     pub teaching_targets: BTreeSet<TargetId>,
     pub repair_targets: BTreeSet<TargetId>,
     pub corrective_recalls_remaining: usize,
+    pub relevance: BTreeMap<TargetId, TargetRelevance>,
 }
 
 #[derive(Default)]
@@ -221,33 +251,64 @@ impl DailySession {
                 }
             }
         }
+        let relevance = |id: &TargetId| {
+            evidence
+                .relevance
+                .get(id)
+                .copied()
+                .filter(|fact| fact.rank().0 > 0)
+        };
+        let ordinary_relevance = |id: &TargetId| {
+            (!evidence.requested_tests.contains(id) && !capture_priority.contains_key(id))
+                .then(|| relevance(id))
+                .flatten()
+        };
         let mut frontiers = Vec::new();
         if repertoire_remaining > 0 {
             for route in routes {
-                if let Some(id) = route
+                if let Some(index) = route
                     .targets
                     .iter()
-                    .find(|id| {
+                    .position(|id| {
                         candidates
-                            .get(*id)
+                            .get(id)
                             .is_some_and(|candidate| !candidate.introduced_this_version)
                     })
-                    .filter(|id| candidates[*id].first_introduced.is_none())
+                    .filter(|index| {
+                        candidates[&route.targets[*index]]
+                            .first_introduced
+                            .is_none()
+                    })
                 {
                     let relevant = !evidence.teaching_targets.is_empty()
                         && route
                             .targets
                             .iter()
                             .any(|target| evidence.teaching_targets.contains(target));
-                    frontiers.push((id, &route.id, relevant));
+                    let id = &route.targets[index];
+                    let reason = route.targets[index..]
+                        .iter()
+                        .filter(|target| {
+                            candidates
+                                .get(*target)
+                                .is_some_and(|candidate| !candidate.introduced_this_version)
+                        })
+                        .filter_map(|target| {
+                            relevance(target).map(|evidence| RelevanceReason {
+                                evidence,
+                                downstream: target != id,
+                            })
+                        })
+                        .min_by_key(|reason| (Reverse(reason.evidence.rank()), reason.downstream));
+                    frontiers.push((id, &route.id, relevant, reason));
                 }
             }
         }
-        frontiers.sort_by_key(|(_, route, _)| *route);
+        frontiers.sort_by_key(|(_, route, _, _)| *route);
 
         let frontier_count = frontiers
             .iter()
-            .map(|(id, _, _)| *id)
+            .map(|(id, _, _, _)| *id)
             .collect::<BTreeSet<_>>()
             .len();
         let active_only = required_activity.is_some_and(|active| {
@@ -255,7 +316,7 @@ impl DailySession {
                 && !due.contains(&active)
                 && !reteach.contains(&active)
                 && !tactics.contains(&active)
-                && !frontiers.iter().any(|(target, _, _)| *target == active)
+                && !frontiers.iter().any(|(target, _, _, _)| *target == active)
         });
         let due_count = due.len();
         let reteach_count = reteach.len();
@@ -281,6 +342,7 @@ impl DailySession {
                         .get(*id)
                         .map(|time| (0, std::cmp::Reverse(*time)))
                         .unwrap_or((1, std::cmp::Reverse(0))),
+                    Reverse(ordinary_relevance(id).map(TargetRelevance::rank)),
                     rank(id),
                     *id,
                 )
@@ -290,11 +352,16 @@ impl DailySession {
             Some(DailyChoice {
                 target,
                 activity: DailyActivity::Repair,
+                relevance: None,
                 route: None,
                 new_kind: None,
             })
         } else if let Some(target) = next_due {
             Some(DailyChoice {
+                relevance: ordinary_relevance(&target).map(|evidence| RelevanceReason {
+                    evidence,
+                    downstream: false,
+                }),
                 target,
                 activity: DailyActivity::Test,
                 route: None,
@@ -304,6 +371,7 @@ impl DailySession {
             Some(DailyChoice {
                 target,
                 activity: DailyActivity::Teach,
+                relevance: None,
                 route: None,
                 new_kind: None,
             })
@@ -313,19 +381,23 @@ impl DailySession {
                 .as_ref()
                 .filter(|_| self.day == Some(context.today))
                 .map_or(0, |route| {
-                    frontiers.partition_point(|(_, id, _)| *id <= route)
+                    frontiers.partition_point(|(_, id, _, _)| *id <= route)
                 });
             let rotated_frontiers = frontiers
                 .iter()
                 .cycle()
                 .skip(rotated)
                 .take(frontiers.len())
-                .filter(|(id, _, _)| available(id));
+                .filter(|(id, _, _, _)| available(id));
             let repertoire = rotated_frontiers
-                .clone()
-                .find(|(_, _, relevant)| *relevant)
-                .or_else(|| rotated_frontiers.into_iter().next())
-                .map(|(id, route, _)| DailyChoice {
+                .min_by_key(|(_, _, teaching, reason)| {
+                    (
+                        !*teaching,
+                        Reverse(reason.map(|reason| reason.evidence.rank())),
+                    )
+                })
+                .map(|(id, route, _, reason)| DailyChoice {
+                    relevance: *reason,
                     target: (*id).clone(),
                     activity: DailyActivity::Teach,
                     route: Some((*route).clone()),
@@ -344,6 +416,7 @@ impl DailySession {
                 activity: DailyActivity::Test,
                 route: None,
                 new_kind: Some(DailyKind::Tactic),
+                relevance: None,
             });
             if self.day == Some(context.today) && self.last_new == Some(DailyKind::Repertoire) {
                 tactic.or(repertoire)
@@ -372,6 +445,7 @@ impl DailySession {
         let practice = next_practice.map(|target| DailyChoice {
             target: target.clone(),
             activity: DailyActivity::Practice,
+            relevance: None,
             route: None,
             new_kind: None,
         });
