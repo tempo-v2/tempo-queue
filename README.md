@@ -112,3 +112,23 @@ checks the real source adapter and retained-block journey. The exact Tempo
 manifest dependency is unchanged; the parent workspace's local patches resolve
 this unreleased scaffold. See `.planning/ARCHITECTURE.md` and
 `.planning/INTERFACES.md` for cross-repository ownership and adoption checks.
+
+
+## Immediate recall from a real missed tactic
+
+`DailyEvidence::immediate_recalls` carries explicit durable request identities and
+Learning's chosen Test/Practice activity. These recalls precede repairs, ordinary
+due work and new work, independently of introduction allowances and tactic-theme
+filters. The newest accepted request wins. Distinct real occurrences remain
+distinct requests even when they share one puzzle target.
+
+Tempo preserves any already active attempt before asking Queue for another one.
+The returned `DailyChoice::immediate_request` is bound to the newly issued attempt
+atomically by Store. Selection itself consumes nothing. Completing an older
+attempt cannot erase a later request.
+
+An explicit session Skip still defers that target. Tempo clears only that target's
+deferral after Store accepts a genuinely new request; replay or detector-revision
+changes do not undo a later Skip. No priority is inferred from display names,
+provenance, puzzle labels or target spelling. Learning decides whether a scheduled
+grade is allowed; required Practice can present the puzzle without changing FSRS.
