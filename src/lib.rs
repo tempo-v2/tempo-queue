@@ -87,6 +87,10 @@ pub use validate_order::validate_order;
 mod test_support;
 
 pub use daily::{
-    DailyActivity, DailyCandidate, DailyChoice, DailyContext, DailyEvidence, DailyKind,
-    DailySelection, DailySession, RelevanceReason, TargetRelevance, daily_rank,
+    DailyActivity, DailyAdmissions, DailyCandidate, DailyChoice, DailyContext, DailyEvidence,
+    DailyKind, DailySelection, DailySelectionInput, DailySession, RelevanceReason, TargetRelevance,
+    daily_rank,
 };
+
+mod tactic_order;
+pub use tactic_order::{PackDifficulty, PackMembership, TacticPackCandidate, rank_new_tactics};

@@ -56,6 +56,23 @@ pub struct DailyContext {
     pub tactics_limit: usize,
 }
 
+#[derive(Default)]
+pub struct DailyAdmissions {
+    pub repertoire: usize,
+    pub tactics: usize,
+}
+
+pub struct DailySelectionInput<'a> {
+    pub context: DailyContext,
+    pub candidates: &'a BTreeMap<TargetId, DailyCandidate>,
+    pub routes: &'a [Line],
+    pub admissions: DailyAdmissions,
+    pub required_activity: Option<&'a TargetId>,
+    pub new_tactic_order: Option<&'a BTreeMap<TargetId, usize>>,
+    pub capture_priority: &'a BTreeMap<TargetId, u64>,
+    pub evidence: &'a DailyEvidence,
+}
+
 /// Relevance is an ordering input for work that is already eligible.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TargetRelevance {
@@ -215,8 +232,36 @@ impl DailySession {
         capture_priority: &BTreeMap<TargetId, u64>,
         evidence: &DailyEvidence,
     ) -> DailySelection {
-        let repertoire_remaining = context.repertoire_limit.saturating_sub(admitted.0);
-        let tactics_remaining = context.tactics_limit.saturating_sub(admitted.1);
+        self.select_daily(DailySelectionInput {
+            context,
+            candidates,
+            routes,
+            admissions: DailyAdmissions {
+                repertoire: admitted.0,
+                tactics: admitted.1,
+            },
+            required_activity,
+            new_tactic_order: new_order,
+            capture_priority,
+            evidence,
+        })
+    }
+
+    pub fn select_daily(&self, input: DailySelectionInput<'_>) -> DailySelection {
+        let DailySelectionInput {
+            context,
+            candidates,
+            routes,
+            admissions,
+            required_activity,
+            new_tactic_order: new_order,
+            capture_priority,
+            evidence,
+        } = input;
+        let repertoire_remaining = context
+            .repertoire_limit
+            .saturating_sub(admissions.repertoire);
+        let tactics_remaining = context.tactics_limit.saturating_sub(admissions.tactics);
         let available =
             |id: &TargetId| self.day != Some(context.today) || !self.deferred.contains(id);
         let rank = |id: &TargetId| daily_rank(context.seed, context.today, id);
@@ -459,8 +504,8 @@ impl DailySession {
             due_count,
             repairs_remaining,
             reteach_count,
-            repertoire_admitted: admitted.0,
-            tactics_admitted: admitted.1,
+            repertoire_admitted: admissions.repertoire,
+            tactics_admitted: admissions.tactics,
             repertoire_remaining,
             tactics_remaining,
             practice,
