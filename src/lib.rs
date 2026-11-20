@@ -88,8 +88,8 @@ mod test_support;
 
 pub use daily::{
     DailyActivity, DailyAdmissions, DailyCandidate, DailyChoice, DailyContext, DailyEvidence,
-    DailyKind, DailySelection, DailySelectionInput, DailySession, RelevanceReason, TargetRelevance,
-    daily_rank,
+    DailyKind, DailySelection, DailySelectionInput, DailySession, ImmediateRecall, RelevanceReason,
+    TargetRelevance, daily_rank,
 };
 
 mod tactic_order;

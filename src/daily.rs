@@ -26,6 +26,8 @@ pub enum DailyActivity {
 }
 
 pub struct DailyChoice {
+    /// The exact durable immediate-recall request bound when this attempt is issued.
+    pub immediate_request: Option<u64>,
     pub target: TargetId,
     pub activity: DailyActivity,
     pub route: Option<String>,
@@ -100,9 +102,19 @@ pub struct RelevanceReason {
     pub downstream: bool,
 }
 
+/// One explicitly requested recall. The supplied activity is decided by Learning;
+/// only Test and Practice are accepted for an immediate blind recall.
+pub struct ImmediateRecall {
+    pub request_id: u64,
+    pub target: TargetId,
+    pub activity: DailyActivity,
+}
+
 /// Evidence facts projected by the daily application from Learning and Games.
 #[derive(Default)]
 pub struct DailyEvidence {
+    pub regular_review_owed: bool,
+    pub immediate_recalls: Vec<ImmediateRecall>,
     pub requested_tests: BTreeSet<TargetId>,
     pub teaching_targets: BTreeSet<TargetId>,
     pub repair_targets: BTreeSet<TargetId>,
@@ -368,21 +380,60 @@ impl DailySession {
         let due_count = due.len();
         let repairs_remaining = repairs.len();
         let reteach_count = reteach.len();
-        let outstanding = usize::from(active_only)
+        let immediate = evidence
+            .immediate_recalls
+            .iter()
+            .filter(|request| candidates.contains_key(&request.target))
+            .filter(|request| {
+                matches!(
+                    request.activity,
+                    DailyActivity::Test | DailyActivity::Practice
+                )
+            })
+            .filter(|request| available(&request.target))
+            .max_by_key(|request| request.request_id);
+        let immediate_targets = evidence
+            .immediate_recalls
+            .iter()
+            .filter(|request| candidates.contains_key(&request.target))
+            .filter(|request| {
+                matches!(
+                    request.activity,
+                    DailyActivity::Test | DailyActivity::Practice
+                )
+            })
+            .collect::<Vec<_>>();
+        let covered_ordinary = immediate_targets
+            .iter()
+            .filter(|request| request.activity == DailyActivity::Test)
+            .map(|request| &request.target)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|target| required_activity != Some(*target) && due.contains(target))
+            .count();
+        let outstanding = immediate_targets.len()
+            + usize::from(active_only)
             + repairs_remaining
             + due.len()
             + reteach.len()
             + frontier_count.min(repertoire_remaining)
-            + tactics.len().min(tactics_remaining);
+            + tactics.len().min(tactics_remaining)
+            - covered_ordinary;
         let first = |ids: Vec<&TargetId>| -> Option<TargetId> {
             ids.into_iter()
                 .filter(|id| available(id))
                 .min_by_key(|id| (rank(id), *id))
                 .cloned()
         };
+        let next_repair = first(repairs);
         let next_due = due
             .into_iter()
-            .filter(|id| available(id))
+            .filter(|id| {
+                available(id)
+                    && !immediate_targets
+                        .iter()
+                        .any(|request| &request.target == *id)
+            })
             .min_by_key(|id| {
                 (
                     !evidence.requested_tests.contains(*id),
@@ -396,8 +447,21 @@ impl DailySession {
                 )
             })
             .cloned();
-        let next = if let Some(target) = first(repairs) {
+        let regular_available = next_repair.is_some() || next_due.is_some();
+        let next = if let Some(request) =
+            immediate.filter(|_| !evidence.regular_review_owed || !regular_available)
+        {
             Some(DailyChoice {
+                immediate_request: Some(request.request_id),
+                target: request.target.clone(),
+                activity: request.activity,
+                relevance: None,
+                route: None,
+                new_kind: None,
+            })
+        } else if let Some(target) = next_repair {
+            Some(DailyChoice {
+                immediate_request: None,
                 target,
                 activity: DailyActivity::Repair,
                 relevance: None,
@@ -406,6 +470,7 @@ impl DailySession {
             })
         } else if let Some(target) = next_due {
             Some(DailyChoice {
+                immediate_request: None,
                 relevance: ordinary_relevance(&target).map(|evidence| RelevanceReason {
                     evidence,
                     downstream: false,
@@ -417,6 +482,7 @@ impl DailySession {
             })
         } else if let Some(target) = first(reteach) {
             Some(DailyChoice {
+                immediate_request: None,
                 target,
                 activity: DailyActivity::Teach,
                 relevance: None,
@@ -445,6 +511,7 @@ impl DailySession {
                     )
                 })
                 .map(|(id, route, _, reason)| DailyChoice {
+                    immediate_request: None,
                     relevance: *reason,
                     target: (*id).clone(),
                     activity: DailyActivity::Teach,
@@ -460,6 +527,7 @@ impl DailySession {
                 None => first(tactics),
             };
             let tactic = target.map(|target| DailyChoice {
+                immediate_request: None,
                 target,
                 activity: DailyActivity::Test,
                 route: None,
@@ -491,6 +559,7 @@ impl DailySession {
                     .min_by_key(|target| (rank(target), *target))
             });
         let practice = next_practice.map(|target| DailyChoice {
+            immediate_request: None,
             target: target.clone(),
             activity: DailyActivity::Practice,
             relevance: None,
@@ -525,4 +594,115 @@ pub fn daily_rank(seed: u64, day: StudyDay, target: &TargetId) -> u64 {
     hash ^= hash >> 27;
     hash = hash.wrapping_mul(0x94d049bb133111eb);
     hash ^ (hash >> 31)
+}
+
+#[cfg(test)]
+mod immediate_tests {
+    use super::*;
+
+    fn select(
+        candidates: &BTreeMap<TargetId, DailyCandidate>,
+        evidence: &DailyEvidence,
+    ) -> DailySelection {
+        DailySession::default().select_daily(DailySelectionInput {
+            context: DailyContext {
+                seed: 0,
+                today: StudyDay(10),
+                repertoire_limit: 0,
+                tactics_limit: 0,
+            },
+            candidates,
+            routes: &[],
+            admissions: DailyAdmissions::default(),
+            required_activity: None,
+            new_tactic_order: Some(&BTreeMap::new()),
+            capture_priority: &BTreeMap::new(),
+            evidence,
+        })
+    }
+
+    #[test]
+    fn newest_immediate_recall_precedes_repairs_due_and_capture_priority_without_new_allowance() {
+        let candidates = ["repair", "due", "older", "newest"]
+            .into_iter()
+            .map(|id| {
+                (
+                    TargetId::from(id),
+                    DailyCandidate {
+                        kind: DailyKind::Tactic,
+                        introduced_this_version: true,
+                        first_introduced: Some(StudyDay(1)),
+                        due: (id == "due").then_some(StudyDay(10)),
+                    },
+                )
+            })
+            .collect();
+        let mut evidence = DailyEvidence::default();
+        evidence.repair_targets.insert("repair".into());
+        evidence.requested_tests.insert("due".into());
+        evidence.immediate_recalls = vec![
+            ImmediateRecall {
+                request_id: 7,
+                target: "older".into(),
+                activity: DailyActivity::Test,
+            },
+            ImmediateRecall {
+                request_id: 8,
+                target: "newest".into(),
+                activity: DailyActivity::Practice,
+            },
+        ];
+        let selected = select(&candidates, &evidence);
+        let next = selected.next.unwrap();
+        assert_eq!(next.target, TargetId::from("newest"));
+        assert_eq!(next.immediate_request, Some(8));
+        assert_eq!(next.activity, DailyActivity::Practice);
+        assert_eq!(next.new_kind, None);
+        assert_eq!(selected.outstanding, 4);
+        // Selection never consumes durable work; only accepted completion can do that.
+        assert_eq!(
+            select(&candidates, &evidence)
+                .next
+                .unwrap()
+                .immediate_request,
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn separate_occurrences_of_one_puzzle_remain_separate_requests() {
+        let candidates = BTreeMap::from([(
+            "same".into(),
+            DailyCandidate {
+                kind: DailyKind::Tactic,
+                introduced_this_version: true,
+                first_introduced: Some(StudyDay(1)),
+                due: Some(StudyDay(10)),
+            },
+        )]);
+        let mut evidence = DailyEvidence::default();
+        evidence.immediate_recalls = vec![
+            ImmediateRecall {
+                request_id: 10,
+                target: "same".into(),
+                activity: DailyActivity::Test,
+            },
+            ImmediateRecall {
+                request_id: 11,
+                target: "same".into(),
+                activity: DailyActivity::Test,
+            },
+        ];
+        let selected = select(&candidates, &evidence);
+        assert_eq!(selected.outstanding, 2);
+        assert_eq!(selected.next.unwrap().immediate_request, Some(11));
+        evidence.immediate_recalls.pop();
+        assert_eq!(
+            select(&candidates, &evidence)
+                .next
+                .unwrap()
+                .immediate_request,
+            Some(10)
+        );
+    }
 }
