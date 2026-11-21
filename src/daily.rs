@@ -33,6 +33,7 @@ pub enum DailyOrderingEffect {
     SatisfyRegularReview,
 }
 
+#[derive(Clone)]
 pub struct DailyChoice {
     pub ordering: DailyOrderingEffect,
     /// The exact durable immediate-recall request bound when this attempt is issued.
@@ -58,6 +59,34 @@ pub struct DailySelection {
     pub tactics_remaining: usize,
     pub practice: Option<DailyChoice>,
     pub unseen_tactics: bool,
+    ordinary_reviews: BTreeMap<TargetId, Option<RelevanceReason>>,
+}
+
+impl DailySelection {
+    /// Keep priority work first. A linked review may take the place of an
+    /// ordinary due review, using the same eligibility and ordering effect.
+    pub fn linked_review(&self, target: &TargetId) -> Option<DailyChoice> {
+        self.next.as_ref().filter(|choice| {
+            choice.activity == DailyActivity::Test
+                && choice.immediate_request.is_none()
+                && self.ordinary_reviews.contains_key(&choice.target)
+        })?;
+        self.ordinary_reviews
+            .get(target)
+            .map(|relevance| due_review(target.clone(), *relevance))
+    }
+}
+
+fn due_review(target: TargetId, relevance: Option<RelevanceReason>) -> DailyChoice {
+    DailyChoice {
+        ordering: DailyOrderingEffect::SatisfyRegularReview,
+        immediate_request: None,
+        target,
+        activity: DailyActivity::Test,
+        route: None,
+        new_kind: None,
+        relevance,
+    }
 }
 
 pub struct DailyContext {
@@ -153,6 +182,10 @@ impl DailySession {
     pub fn defer(&mut self, target: TargetId, day: StudyDay) {
         self.for_day(day);
         self.deferred.insert(target);
+    }
+
+    pub fn is_deferred(&self, target: &TargetId, day: StudyDay) -> bool {
+        self.day == Some(day) && self.deferred.contains(target)
     }
 
     /// A reset removes this target's skip without resuming other skipped work.
@@ -283,8 +316,7 @@ impl DailySession {
             .repertoire_limit
             .saturating_sub(admissions.repertoire);
         let tactics_remaining = context.tactics_limit.saturating_sub(admissions.tactics);
-        let available =
-            |id: &TargetId| self.day != Some(context.today) || !self.deferred.contains(id);
+        let available = |id: &TargetId| !self.is_deferred(id, context.today);
         let rank = |id: &TargetId| daily_rank(context.seed, context.today, id);
         let mut due = Vec::new();
         let mut repairs = Vec::new();
@@ -435,14 +467,30 @@ impl DailySession {
                 .cloned()
         };
         let next_repair = first(repairs);
+        let available_due = |id: &&TargetId| {
+            available(id)
+                && !immediate_targets
+                    .iter()
+                    .any(|request| &request.target == *id)
+        };
+        let due_relevance = |id| {
+            ordinary_relevance(id).map(|evidence| RelevanceReason {
+                evidence,
+                downstream: false,
+            })
+        };
+        let ordinary_reviews = due
+            .iter()
+            .copied()
+            .filter(available_due)
+            .filter(|id| {
+                !evidence.requested_tests.contains(*id) && !capture_priority.contains_key(*id)
+            })
+            .map(|id| (id.clone(), due_relevance(id)))
+            .collect();
         let next_due = due
             .into_iter()
-            .filter(|id| {
-                available(id)
-                    && !immediate_targets
-                        .iter()
-                        .any(|request| &request.target == *id)
-            })
+            .filter(available_due)
             .min_by_key(|id| {
                 (
                     !evidence.requested_tests.contains(*id),
@@ -480,18 +528,8 @@ impl DailySession {
                 new_kind: None,
             })
         } else if let Some(target) = next_due {
-            Some(DailyChoice {
-                immediate_request: None,
-                ordering: DailyOrderingEffect::SatisfyRegularReview,
-                relevance: ordinary_relevance(&target).map(|evidence| RelevanceReason {
-                    evidence,
-                    downstream: false,
-                }),
-                target,
-                activity: DailyActivity::Test,
-                route: None,
-                new_kind: None,
-            })
+            let relevance = due_relevance(&target);
+            Some(due_review(target, relevance))
         } else if let Some(target) = first(reteach) {
             Some(DailyChoice {
                 immediate_request: None,
@@ -583,6 +621,7 @@ impl DailySession {
             new_kind: None,
         });
         DailySelection {
+            ordinary_reviews,
             corrective_recalls_remaining: evidence.corrective_recalls_remaining,
             next,
             outstanding,
