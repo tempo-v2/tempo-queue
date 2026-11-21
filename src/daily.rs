@@ -25,7 +25,16 @@ pub enum DailyActivity {
     Practice,
 }
 
+/// The durable turn update proposed by Queue when the chosen attempt is issued.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DailyOrderingEffect {
+    Preserve,
+    OweRegularReview,
+    SatisfyRegularReview,
+}
+
 pub struct DailyChoice {
+    pub ordering: DailyOrderingEffect,
     /// The exact durable immediate-recall request bound when this attempt is issued.
     pub immediate_request: Option<u64>,
     pub target: TargetId,
@@ -453,6 +462,7 @@ impl DailySession {
         {
             Some(DailyChoice {
                 immediate_request: Some(request.request_id),
+                ordering: DailyOrderingEffect::OweRegularReview,
                 target: request.target.clone(),
                 activity: request.activity,
                 relevance: None,
@@ -462,6 +472,7 @@ impl DailySession {
         } else if let Some(target) = next_repair {
             Some(DailyChoice {
                 immediate_request: None,
+                ordering: DailyOrderingEffect::SatisfyRegularReview,
                 target,
                 activity: DailyActivity::Repair,
                 relevance: None,
@@ -471,6 +482,7 @@ impl DailySession {
         } else if let Some(target) = next_due {
             Some(DailyChoice {
                 immediate_request: None,
+                ordering: DailyOrderingEffect::SatisfyRegularReview,
                 relevance: ordinary_relevance(&target).map(|evidence| RelevanceReason {
                     evidence,
                     downstream: false,
@@ -483,6 +495,7 @@ impl DailySession {
         } else if let Some(target) = first(reteach) {
             Some(DailyChoice {
                 immediate_request: None,
+                ordering: DailyOrderingEffect::Preserve,
                 target,
                 activity: DailyActivity::Teach,
                 relevance: None,
@@ -512,6 +525,7 @@ impl DailySession {
                 })
                 .map(|(id, route, _, reason)| DailyChoice {
                     immediate_request: None,
+                    ordering: DailyOrderingEffect::Preserve,
                     relevance: *reason,
                     target: (*id).clone(),
                     activity: DailyActivity::Teach,
@@ -528,6 +542,7 @@ impl DailySession {
             };
             let tactic = target.map(|target| DailyChoice {
                 immediate_request: None,
+                ordering: DailyOrderingEffect::Preserve,
                 target,
                 activity: DailyActivity::Test,
                 route: None,
@@ -560,6 +575,7 @@ impl DailySession {
             });
         let practice = next_practice.map(|target| DailyChoice {
             immediate_request: None,
+            ordering: DailyOrderingEffect::Preserve,
             target: target.clone(),
             activity: DailyActivity::Practice,
             relevance: None,
