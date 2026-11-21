@@ -23,6 +23,8 @@ pub enum DailyActivity {
     Repair,
     Test,
     Practice,
+    /// Ungraded reproduction of a familiar predecessor before an ordinary review.
+    RepertoireWarmup,
 }
 
 /// The durable turn update proposed by Queue when the chosen attempt is issued.
@@ -33,6 +35,9 @@ pub enum DailyOrderingEffect {
     SatisfyRegularReview,
 }
 
+/// An issued-work proposal produced by Queue.
+#[derive(Clone)]
+#[non_exhaustive]
 pub struct DailyChoice {
     pub ordering: DailyOrderingEffect,
     /// The exact durable immediate-recall request bound when this attempt is issued.
@@ -58,6 +63,40 @@ pub struct DailySelection {
     pub tactics_remaining: usize,
     pub practice: Option<DailyChoice>,
     pub unseen_tactics: bool,
+    today: StudyDay,
+    ordinary_reviews: BTreeMap<TargetId, (DailyKind, Option<RelevanceReason>)>,
+}
+
+impl DailySelection {
+    fn ordinary_choice(&self) -> Option<&DailyChoice> {
+        self.next.as_ref().filter(|choice| {
+            choice.activity == DailyActivity::Test
+                && choice.immediate_request.is_none()
+                && self.ordinary_reviews.contains_key(&choice.target)
+        })
+    }
+
+    /// A linked repertoire review may take the place of an ordinary due
+    /// review, using the same eligibility and ordering effect.
+    pub fn linked_review(&self, target: &TargetId) -> Option<DailyChoice> {
+        self.ordinary_choice()?;
+        self.ordinary_reviews
+            .get(target)
+            .filter(|(kind, _)| *kind == DailyKind::Repertoire)
+            .map(|(_, relevance)| due_review(target.clone(), *relevance))
+    }
+}
+
+fn due_review(target: TargetId, relevance: Option<RelevanceReason>) -> DailyChoice {
+    DailyChoice {
+        ordering: DailyOrderingEffect::SatisfyRegularReview,
+        immediate_request: None,
+        target,
+        activity: DailyActivity::Test,
+        route: None,
+        new_kind: None,
+        relevance,
+    }
 }
 
 pub struct DailyContext {
@@ -155,6 +194,36 @@ impl DailySession {
         self.deferred.insert(target);
     }
 
+    fn is_deferred(&self, target: &TargetId, day: StudyDay) -> bool {
+        self.day == Some(day) && self.deferred.contains(target)
+    }
+
+    /// Offer Practice of the verified, familiar predecessor of the selected
+    /// review. The caller establishes the chess link and familiarity. Queue
+    /// owns deferral, priority, and the effect of issuing this choice.
+    pub fn repertoire_warmup(
+        &self,
+        selection: &DailySelection,
+        predecessor: &TargetId,
+    ) -> Option<DailyChoice> {
+        let review = selection.ordinary_choice()?;
+        if selection.ordinary_reviews[&review.target].0 != DailyKind::Repertoire
+            || predecessor == &review.target
+            || self.is_deferred(predecessor, selection.today)
+        {
+            return None;
+        }
+        Some(DailyChoice {
+            ordering: DailyOrderingEffect::Preserve,
+            immediate_request: None,
+            target: predecessor.clone(),
+            activity: DailyActivity::RepertoireWarmup,
+            route: None,
+            new_kind: None,
+            relevance: None,
+        })
+    }
+
     /// A reset removes this target's skip without resuming other skipped work.
     pub fn clear_deferral(&mut self, target: &TargetId) {
         self.deferred.remove(target);
@@ -166,6 +235,9 @@ impl DailySession {
 
     /// Call after durable issuance succeeds.
     pub fn issued(&mut self, choice: &DailyChoice, day: StudyDay) {
+        if choice.activity == DailyActivity::RepertoireWarmup {
+            return;
+        }
         self.for_day(day);
         if choice.activity == DailyActivity::Practice {
             self.last_practice = Some(choice.target.clone());
@@ -283,8 +355,7 @@ impl DailySession {
             .repertoire_limit
             .saturating_sub(admissions.repertoire);
         let tactics_remaining = context.tactics_limit.saturating_sub(admissions.tactics);
-        let available =
-            |id: &TargetId| self.day != Some(context.today) || !self.deferred.contains(id);
+        let available = |id: &TargetId| !self.is_deferred(id, context.today);
         let rank = |id: &TargetId| daily_rank(context.seed, context.today, id);
         let mut due = Vec::new();
         let mut repairs = Vec::new();
@@ -435,14 +506,30 @@ impl DailySession {
                 .cloned()
         };
         let next_repair = first(repairs);
+        let available_due = |id: &&TargetId| {
+            available(id)
+                && !immediate_targets
+                    .iter()
+                    .any(|request| &request.target == *id)
+        };
+        let due_relevance = |id| {
+            ordinary_relevance(id).map(|evidence| RelevanceReason {
+                evidence,
+                downstream: false,
+            })
+        };
+        let ordinary_reviews = due
+            .iter()
+            .copied()
+            .filter(available_due)
+            .filter(|id| {
+                !evidence.requested_tests.contains(*id) && !capture_priority.contains_key(*id)
+            })
+            .map(|id| (id.clone(), (candidates[id].kind, due_relevance(id))))
+            .collect();
         let next_due = due
             .into_iter()
-            .filter(|id| {
-                available(id)
-                    && !immediate_targets
-                        .iter()
-                        .any(|request| &request.target == *id)
-            })
+            .filter(available_due)
             .min_by_key(|id| {
                 (
                     !evidence.requested_tests.contains(*id),
@@ -480,18 +567,8 @@ impl DailySession {
                 new_kind: None,
             })
         } else if let Some(target) = next_due {
-            Some(DailyChoice {
-                immediate_request: None,
-                ordering: DailyOrderingEffect::SatisfyRegularReview,
-                relevance: ordinary_relevance(&target).map(|evidence| RelevanceReason {
-                    evidence,
-                    downstream: false,
-                }),
-                target,
-                activity: DailyActivity::Test,
-                route: None,
-                new_kind: None,
-            })
+            let relevance = due_relevance(&target);
+            Some(due_review(target, relevance))
         } else if let Some(target) = first(reteach) {
             Some(DailyChoice {
                 immediate_request: None,
@@ -583,6 +660,8 @@ impl DailySession {
             new_kind: None,
         });
         DailySelection {
+            today: context.today,
+            ordinary_reviews,
             corrective_recalls_remaining: evidence.corrective_recalls_remaining,
             next,
             outstanding,
@@ -720,5 +799,87 @@ mod immediate_tests {
                 .immediate_request,
             Some(10)
         );
+    }
+
+    #[test]
+    fn warmup_preserves_the_regular_turn_and_tactics_practice_rotation() {
+        let today = StudyDay(10);
+        let anchor = TargetId::from("anchor");
+        let parent = TargetId::from("parent");
+        let mut session = DailySession::default();
+        let candidates = [
+            ("anchor", DailyKind::Repertoire, Some(today)),
+            ("parent", DailyKind::Repertoire, None),
+            ("tactic-a", DailyKind::Tactic, None),
+            ("tactic-b", DailyKind::Tactic, None),
+        ]
+        .into_iter()
+        .map(|(id, kind, due)| {
+            (
+                id.into(),
+                DailyCandidate {
+                    kind,
+                    due,
+                    introduced_this_version: true,
+                    first_introduced: Some(StudyDay(1)),
+                },
+            )
+        })
+        .collect();
+        let mut evidence = DailyEvidence {
+            regular_review_owed: true,
+            immediate_recalls: vec![ImmediateRecall {
+                request_id: 7,
+                target: "tactic-a".into(),
+                activity: DailyActivity::Practice,
+            }],
+            ..Default::default()
+        };
+        let select = |session: &DailySession, evidence: &DailyEvidence| {
+            session.select_daily(DailySelectionInput {
+                context: DailyContext {
+                    seed: 0,
+                    today,
+                    repertoire_limit: 0,
+                    tactics_limit: 0,
+                },
+                candidates: &candidates,
+                routes: &[],
+                admissions: DailyAdmissions::default(),
+                required_activity: None,
+                new_tactic_order: None,
+                capture_priority: &BTreeMap::new(),
+                evidence,
+            })
+        };
+        let first_practice = select(&session, &evidence).practice.unwrap();
+        session.issued(&first_practice, today);
+        let selection = select(&session, &evidence);
+        assert_eq!(selection.next.as_ref().unwrap().target, anchor);
+        let next_practice = &selection.practice.as_ref().unwrap().target;
+        assert_ne!(next_practice, &first_practice.target);
+
+        let warmup = session.repertoire_warmup(&selection, &parent).unwrap();
+        assert_eq!(warmup.target, parent);
+        assert_eq!(warmup.activity, DailyActivity::RepertoireWarmup);
+        assert_eq!(warmup.ordering, DailyOrderingEffect::Preserve);
+        assert_eq!(warmup.immediate_request, None);
+        session.issued(&warmup, today);
+        assert_eq!(session.last_practice.as_ref(), Some(&first_practice.target));
+        let after = select(&session, &evidence);
+        assert_eq!(&after.practice.unwrap().target, next_practice);
+        assert_eq!(after.next.unwrap().target, anchor);
+
+        session.defer(parent.clone(), today);
+        assert!(
+            session
+                .repertoire_warmup(&select(&session, &evidence), &parent)
+                .is_none()
+        );
+        session.clear_deferral(&parent);
+        evidence.regular_review_owed = false;
+        let priority = select(&session, &evidence);
+        assert_eq!(priority.next.as_ref().unwrap().immediate_request, Some(7));
+        assert!(session.repertoire_warmup(&priority, &parent).is_none());
     }
 }
