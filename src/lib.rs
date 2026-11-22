@@ -3,11 +3,16 @@
 //! [`DailySession::select_daily`] proposes the next activity from the supplied day
 //! and Learning facts. The application commits issuance and its ordering effect.
 
+mod batch_plan;
 mod daily;
 mod line;
 mod plan;
 mod tactic_order;
 
+pub use batch_plan::{
+    BatchPlanError, BatchPlanInput, BatchTarget, BatchWork, CapturedIssuedWork, PreparedBatch,
+    TeachAdmission, TeachingRemaining, build_batch_plan,
+};
 pub use daily::{
     DailyActivity, DailyAdmissions, DailyCandidate, DailyChoice, DailyContext, DailyEvidence,
     DailyKind, DailyOrderingEffect, DailySelection, DailySelectionInput, DailySession,
