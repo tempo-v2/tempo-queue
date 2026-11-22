@@ -146,9 +146,26 @@ impl fmt::Display for BatchPlanError {
 
 impl std::error::Error for BatchPlanError {}
 
-/// Prepare a complete order for the captured day and basis. Publication still
-/// requires Store to verify the original basis after staging the entries.
-pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, BatchPlanError> {
+pub(super) enum ClassifiedWork<'a> {
+    Issued {
+        work: &'a WorkToken,
+        priority: PlanPriority,
+    },
+    Candidate {
+        day: StudyDay,
+        target: &'a BatchTarget,
+        priority: PlanPriority,
+        revision: MissRevision,
+        deferred: bool,
+        first_introduction: bool,
+    },
+}
+
+/// Walk exact eligible obligations before ordering or allocating Teach slots.
+pub(super) fn classify_work(
+    input: &BatchPlanInput<'_>,
+    mut visit: impl FnMut(ClassifiedWork<'_>),
+) -> Result<(), BatchPlanError> {
     if input.targets.len() != input.expected_targets {
         return Err(BatchPlanError::IncompleteCoverage {
             expected: input.expected_targets,
@@ -163,10 +180,12 @@ pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, Batc
         .deferrals
         .iter()
         .filter(|deferral| deferral.day == day)
-        .map(|deferral| &deferral.obligation)
+        .map(|deferral| {
+            let work = &deferral.obligation;
+            (&work.target, work.version, work.kind, work.revision)
+        })
         .collect();
     let mut seen = BTreeSet::new();
-    let mut rows = Vec::new();
     for target in input.targets {
         if !valid_target(&target.target, target.version) {
             return Err(BatchPlanError::InvalidTarget(target.target.clone()));
@@ -191,15 +210,10 @@ pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, Batc
             .filter(|issued| issued.work.day == day)
             .and_then(|issued| issued.stage_priority.map(|priority| (issued, priority)))
         {
-            rows.push((
-                PlanEntry {
-                    work: issued.work.clone(),
-                    priority,
-                    ordinal: 0,
-                    state: PlanEntryState::Issued,
-                },
-                None,
-            ));
+            visit(ClassifiedWork::Issued {
+                work: &issued.work,
+                priority,
+            });
         }
         let Some(work) = target.work else {
             continue;
@@ -207,39 +221,76 @@ pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, Batc
         let Some((priority, revision)) = work.for_day(day, target.teaching) else {
             continue;
         };
-        let obligation = WorkObligation {
-            target: target.target.clone(),
-            version: target.version,
-            kind: priority_kind(priority),
-            revision,
-        };
-        if issued.is_some_and(|issued| issued.work.obligation == obligation) {
+        let kind = priority_kind(priority);
+        if issued.is_some_and(|issued| {
+            let work = &issued.work.obligation;
+            work.kind == kind && work.revision == revision
+        }) {
             continue;
         }
-        let state = if deferrals.contains(&obligation) {
-            PlanEntryState::Deferred
-        } else {
-            PlanEntryState::Ready
-        };
-        let charge = (state == PlanEntryState::Ready
-            && matches!(
+        visit(ClassifiedWork::Candidate {
+            day,
+            target,
+            priority,
+            revision,
+            deferred: deferrals.contains(&(&target.target, target.version, kind, revision)),
+            first_introduction: matches!(
                 work,
                 BatchWork::Teach {
                     kind: TeachKind::Introduction,
                     ..
                 }
-            ))
-        .then_some(target.teaching);
-        rows.push((
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Prepare a complete order for the captured day and basis. Publication still
+/// requires Store to verify the original basis after staging the entries.
+pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, BatchPlanError> {
+    let mut rows = Vec::new();
+    classify_work(&input, |work| match work {
+        ClassifiedWork::Issued { work, priority } => rows.push((
             PlanEntry {
-                work: WorkToken { day, obligation },
+                work: work.clone(),
                 priority,
                 ordinal: 0,
-                state,
+                state: PlanEntryState::Issued,
             },
-            charge,
-        ));
-    }
+            None,
+        )),
+        ClassifiedWork::Candidate {
+            day,
+            target,
+            priority,
+            revision,
+            deferred,
+            first_introduction,
+        } => {
+            rows.push((
+                PlanEntry {
+                    work: WorkToken {
+                        day,
+                        obligation: WorkObligation {
+                            target: target.target.clone(),
+                            version: target.version,
+                            kind: priority_kind(priority),
+                            revision,
+                        },
+                    },
+                    priority,
+                    ordinal: 0,
+                    state: if deferred {
+                        PlanEntryState::Deferred
+                    } else {
+                        PlanEntryState::Ready
+                    },
+                },
+                (!deferred && first_introduction).then_some(target.teaching),
+            ));
+        }
+    })?;
     rows.sort_unstable_by(|(left, _), (right, _)| {
         left.priority
             .cmp(&right.priority)

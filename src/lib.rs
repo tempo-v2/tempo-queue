@@ -7,6 +7,7 @@ mod batch_plan;
 mod daily;
 mod line;
 mod plan;
+mod summary;
 
 pub use batch_plan::{
     BatchPlanError, BatchPlanInput, BatchTarget, BatchWork, CapturedIssuedWork, PreparedBatch,
@@ -17,6 +18,7 @@ pub use daily::{
     DailyKind, DailyOrderingEffect, DailySelection, DailySelectionInput, DailySession,
     ImmediateRecall, RelevanceReason, TargetRelevance, daily_rank,
 };
+pub use summary::{ReadyWorkCounts, StudySummaryCounts, classify_study_summary};
 pub use line::Line;
 pub use plan::{
     AcceptedPlanChange, MAX_PLAN_CANDIDATES, PlanEntry, PlanEntryState, PlanFreshness, PlanHead,
