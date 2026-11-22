@@ -10,7 +10,7 @@ mod plan;
 
 pub use batch_plan::{
     BatchPlanError, BatchPlanInput, BatchTarget, BatchWork, CapturedIssuedWork, PreparedBatch,
-    TeachAdmission, TeachingRemaining, build_batch_plan,
+    TeachAdmission, TeachKind, TeachingRemaining, build_batch_plan,
 };
 pub use daily::{
     DailyActivity, DailyAdmissions, DailyCandidate, DailyChoice, DailyContext, DailyEvidence,

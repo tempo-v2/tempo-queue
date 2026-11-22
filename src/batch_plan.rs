@@ -23,6 +23,13 @@ impl TeachAdmission {
     }
 }
 
+/// Only a first introduction spends the independent family allowance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TeachKind {
+    Introduction,
+    Relearn,
+}
+
 /// At most one currently relevant Learning operation per target.
 /// The capture owner represents future corrections as waiting work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +43,7 @@ pub enum BatchWork {
     },
     Teach {
         revision: MissRevision,
+        kind: TeachKind,
     },
 }
 
@@ -50,7 +58,7 @@ impl BatchWork {
             Self::ScheduledTest { due, revision } if due <= day => {
                 Some((PlanPriority::DueTest(due), revision))
             }
-            Self::Teach { revision } if teaching.can_teach() => {
+            Self::Teach { revision, .. } if teaching.can_teach() => {
                 Some((PlanPriority::Teach, revision))
             }
             _ => None,
@@ -73,7 +81,9 @@ pub struct BatchTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedIssuedWork {
     pub work: WorkToken,
-    pub priority: PlanPriority,
+    /// Available only when capture proves a priority compatible with this issue.
+    /// An active identity still suppresses its exact obligation without a row.
+    pub stage_priority: Option<PlanPriority>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -177,21 +187,24 @@ pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, Batc
             issued.work.obligation.target == target.target
                 && issued.work.obligation.version == target.version
         });
-        if let Some(issued) = issued.filter(|issued| issued.work.day == day) {
+        if let Some((issued, priority)) = issued
+            .filter(|issued| issued.work.day == day)
+            .and_then(|issued| issued.stage_priority.map(|priority| (issued, priority)))
+        {
             rows.push((
                 PlanEntry {
                     work: issued.work.clone(),
-                    priority: issued.priority,
+                    priority,
                     ordinal: 0,
                     state: PlanEntryState::Issued,
                 },
-                target.teaching,
+                None,
             ));
         }
-        let Some((priority, revision)) = target
-            .work
-            .and_then(|work| work.for_day(day, target.teaching))
-        else {
+        let Some(work) = target.work else {
+            continue;
+        };
+        let Some((priority, revision)) = work.for_day(day, target.teaching) else {
             continue;
         };
         let obligation = WorkObligation {
@@ -208,6 +221,15 @@ pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, Batc
         } else {
             PlanEntryState::Ready
         };
+        let charge = (state == PlanEntryState::Ready
+            && matches!(
+                work,
+                BatchWork::Teach {
+                    kind: TeachKind::Introduction,
+                    ..
+                }
+            ))
+        .then_some(target.teaching);
         rows.push((
             PlanEntry {
                 work: WorkToken { day, obligation },
@@ -215,7 +237,7 @@ pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, Batc
                 ordinal: 0,
                 state,
             },
-            target.teaching,
+            charge,
         ));
     }
     rows.sort_unstable_by(|(left, _), (right, _)| {
@@ -237,11 +259,7 @@ pub fn build_batch_plan(input: BatchPlanInput<'_>) -> Result<PreparedBatch, Batc
     let mut remaining = input.remaining;
     let entries = rows
         .into_iter()
-        .filter(|(entry, family)| {
-            entry.priority != PlanPriority::Teach
-                || entry.state != PlanEntryState::Ready
-                || remaining.admit(*family)
-        })
+        .filter(|(_, charge)| charge.is_none_or(|family| remaining.admit(family)))
         .enumerate()
         .map(|(ordinal, (mut entry, _))| {
             entry.ordinal = ordinal as u64;
@@ -270,12 +288,14 @@ fn valid_issued(issued: &CapturedIssuedWork) -> bool {
     let work = &issued.work;
     let obligation = &work.obligation;
     valid_target(&obligation.target, obligation.version)
-        && obligation.kind == priority_kind(issued.priority)
-        && match issued.priority {
-            PlanPriority::Correction => obligation.revision.0 != 0,
-            PlanPriority::DueTest(due) => due <= work.day,
-            PlanPriority::Teach => true,
-        }
+        && (obligation.kind != WorkKind::Correction || obligation.revision.0 != 0)
+        && issued.stage_priority.is_none_or(|priority| {
+            obligation.kind == priority_kind(priority)
+                && match priority {
+                    PlanPriority::DueTest(due) => due <= work.day,
+                    PlanPriority::Correction | PlanPriority::Teach => true,
+                }
+        })
 }
 
 #[cfg(test)]
@@ -289,6 +309,11 @@ mod tests {
     const OPENING: TeachAdmission = TeachAdmission::Repertoire { at_frontier: true };
     const TEACH: BatchWork = BatchWork::Teach {
         revision: MissRevision(0),
+        kind: TeachKind::Introduction,
+    };
+    const RELEARN: BatchWork = BatchWork::Teach {
+        revision: MissRevision(0),
+        kind: TeachKind::Relearn,
     };
 
     fn basis() -> PlanBasis {
@@ -327,7 +352,7 @@ mod tests {
         let (kind, revision) = match work.work.unwrap() {
             BatchWork::Correction { revision } => (WorkKind::Correction, revision),
             BatchWork::ScheduledTest { revision, .. } => (WorkKind::Test, revision),
-            BatchWork::Teach { revision } => (WorkKind::Teach, revision),
+            BatchWork::Teach { revision, .. } => (WorkKind::Teach, revision),
         };
         CapturedIssuedWork {
             work: WorkToken {
@@ -339,7 +364,7 @@ mod tests {
                     revision,
                 },
             },
-            priority,
+            stage_priority: Some(priority),
         }
     }
 
@@ -511,6 +536,35 @@ mod tests {
     }
 
     #[test]
+    fn batch_plan_relearning_keeps_stable_order_without_spending_allowance() {
+        let basis = basis();
+        let targets = [
+            target("e-tactic-over-limit", TACTIC, TEACH),
+            target("d-opening-over-limit", OPENING, TEACH),
+            target("c-tactic-relearn", TACTIC, RELEARN),
+            target("b-opening-introduction", OPENING, TEACH),
+            target("a-opening-relearn", OPENING, RELEARN),
+        ];
+        let (_, entries) = build_batch_plan(BatchPlanInput {
+            remaining: TeachingRemaining {
+                repertoire: 1,
+                tactics: 0,
+            },
+            ..input(&basis, &targets)
+        })
+        .unwrap()
+        .into_parts();
+        assert_eq!(
+            identities(&entries),
+            [
+                ("a-opening-relearn", PlanEntryState::Ready),
+                ("b-opening-introduction", PlanEntryState::Ready),
+                ("c-tactic-relearn", PlanEntryState::Ready),
+            ]
+        );
+    }
+
+    #[test]
     fn batch_plan_keeps_new_correction_independent_of_the_same_targets_deferred_revision() {
         let basis = basis();
         let old = target("position", OPENING, correction(3));
@@ -595,6 +649,39 @@ mod tests {
     }
 
     #[test]
+    fn batch_plan_suppresses_exact_active_test_without_guessing_its_issued_due() {
+        let basis = basis();
+        let active = target("position", OPENING, scheduled(9));
+        let issued = CapturedIssuedWork {
+            stage_priority: None,
+            ..capture(&active, 9, PlanPriority::DueTest(StudyDay(9)))
+        };
+        let newer_version = BatchTarget {
+            version: ContentVersion(2),
+            ..active.clone()
+        };
+        let newer_revision = BatchTarget {
+            work: Some(BatchWork::ScheduledTest {
+                due: StudyDay(9),
+                revision: MissRevision(1),
+            }),
+            ..active.clone()
+        };
+        let entries = |target| {
+            build_batch_plan(BatchPlanInput {
+                issued: Some(&issued),
+                ..input(&basis, &[target])
+            })
+            .unwrap()
+            .into_parts()
+            .1
+        };
+        assert!(entries(active).is_empty());
+        assert_eq!(entries(newer_version)[0].state, PlanEntryState::Ready);
+        assert_eq!(entries(newer_revision)[0].state, PlanEntryState::Ready);
+    }
+
+    #[test]
     fn batch_plan_rejects_incomplete_duplicate_or_malformed_captures() {
         let basis = basis();
         let target = target("position", OPENING, correction(3));
@@ -630,7 +717,7 @@ mod tests {
             Err(BatchPlanError::InvalidLearningWork(target.target.clone())),
         );
         let issued = CapturedIssuedWork {
-            priority: PlanPriority::Teach,
+            stage_priority: Some(PlanPriority::Teach),
             ..capture(&target, 10, PlanPriority::Correction)
         };
         assert_eq!(
