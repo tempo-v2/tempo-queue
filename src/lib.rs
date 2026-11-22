@@ -5,6 +5,7 @@
 
 mod daily;
 mod line;
+mod plan;
 mod tactic_order;
 
 pub use daily::{
@@ -13,5 +14,10 @@ pub use daily::{
     ImmediateRecall, RelevanceReason, TargetRelevance, daily_rank,
 };
 pub use line::Line;
+pub use plan::{
+    AcceptedPlanChange, MAX_PLAN_CANDIDATES, PlanEntry, PlanEntryState, PlanFreshness, PlanHead,
+    PlanMutation, PlanPriority, PlanReadiness, PlanScan, PlanScanResult, PlanUpdate,
+    plan_freshness, plan_readiness, plan_update, summary_is_current,
+};
 
 pub use tactic_order::{PackDifficulty, PackMembership, TacticPackCandidate, rank_new_tactics};
