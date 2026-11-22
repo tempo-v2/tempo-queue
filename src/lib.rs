@@ -7,7 +7,6 @@ mod batch_plan;
 mod daily;
 mod line;
 mod plan;
-mod tactic_order;
 
 pub use batch_plan::{
     BatchPlanError, BatchPlanInput, BatchTarget, BatchWork, CapturedIssuedWork, PreparedBatch,
@@ -24,5 +23,3 @@ pub use plan::{
     PlanMutation, PlanPriority, PlanReadiness, PlanScan, PlanScanResult, PlanUpdate,
     plan_freshness, plan_readiness, plan_update, summary_is_current,
 };
-
-pub use tactic_order::{PackDifficulty, PackMembership, TacticPackCandidate, rank_new_tactics};
