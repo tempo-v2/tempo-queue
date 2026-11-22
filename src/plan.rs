@@ -1,18 +1,11 @@
 //! Pure decisions over published prepared-order metadata and accepted Study work.
 
-use tempo_types::{
-    DeferredWork, PlanBasis, PlanGeneration, StudyDay, SummaryBasis, WorkKind, WorkToken,
-};
+use tempo_types::{DeferredWork, PlanBasis, PlanGeneration, SummaryBasis, WorkKind, WorkToken};
+
+pub use tempo_types::{PlanEntry, PlanEntryState, PlanHead, PlanPriority};
 
 /// Maximum indexed candidates the application can validate in one Next.
 pub const MAX_PLAN_CANDIDATES: usize = 32;
-
-/// Only Store's complete, published generation can be a serving head.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlanHead {
-    pub generation: PlanGeneration,
-    pub basis: PlanBasis,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanFreshness {
@@ -49,30 +42,6 @@ pub fn plan_freshness(current: &PlanBasis, head: Option<&PlanHead>) -> PlanFresh
 /// Count freshness is independent of rank revision and generation publication.
 pub fn summary_is_current(current: &SummaryBasis, published: Option<&SummaryBasis>) -> bool {
     published == Some(current)
-}
-
-/// Ordering class for ready work. Equal priorities use stable target identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PlanPriority {
-    Correction,
-    DueTest(StudyDay),
-    Teach,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlanEntryState {
-    Ready,
-    Issued,
-    Deferred,
-    Consumed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlanEntry {
-    pub work: WorkToken,
-    pub priority: PlanPriority,
-    pub ordinal: u64,
-    pub state: PlanEntryState,
 }
 
 /// Proof supplied by the addressed lookup of one published generation.
@@ -241,7 +210,8 @@ fn is_first_correction(test: &WorkToken, correction: &WorkToken) -> bool {
 mod tests {
     use super::*;
     use tempo_types::{
-        ContentVersion, MembershipEpoch, MissRevision, RankRevision, SummaryEpoch, WorkObligation,
+        ContentVersion, MembershipEpoch, MissRevision, RankRevision, StudyDay, SummaryEpoch,
+        WorkObligation,
     };
 
     fn basis() -> PlanBasis {
