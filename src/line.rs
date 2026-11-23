@@ -2,13 +2,7 @@
 use serde::{Deserialize, Serialize};
 use tempo_types::TargetId;
 
-/// Supply a line when new targets should be introduced in content order.
-/// [`crate::eligibility`] admits the first active, unintroduced target on each line,
-/// deduplicating a shared target across transpositions and repeated occurrences.
-/// Every occurrence must refer to a candidate in [`crate::QueueInput`].
-///
-/// A line controls *introduction*. Use [`crate::Group`] separately to request that
-/// already eligible exercises stay together during presentation.
+/// Ordered repertoire occurrences used by Daily Study to find each Teach frontier.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
     /// Content occurrence identity; it does not create a separate learning identity.
@@ -20,40 +14,55 @@ pub struct Line {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Candidate, QueueInput, eligibility};
+    use crate::{DailyActivity, DailyCandidate, DailyContext, DailyKind, DailySession};
     use tempo_types::StudyDay;
+
     #[test]
-    fn two_lines_that_transpose_introduce_the_shared_position_only_once() {
+    fn shared_repertoire_frontier_counts_once_across_lines_and_repetitions() {
         let candidates = ["shared-position", "later-position"]
             .into_iter()
-            .map(|id| Candidate {
-                target: id.into(),
-                active: true,
-                introduced: false,
-                due: None,
-                repeat_pending: false,
-                independent_new: false,
+            .map(|id| {
+                (
+                    id.into(),
+                    DailyCandidate {
+                        kind: DailyKind::Repertoire,
+                        introduced_this_version: false,
+                        first_introduced: None,
+                        due: None,
+                    },
+                )
             })
             .collect();
-        let input = QueueInput {
-            today: StudyDay(10),
-            candidates,
-            lines: vec![
-                Line {
-                    id: "main-line".into(),
-                    targets: vec!["shared-position".into(), "later-position".into()],
-                },
-                Line {
-                    id: "transposition".into(),
-                    targets: vec!["shared-position".into(), "shared-position".into()],
-                },
-            ],
+        let main = Line {
+            id: "main-line".into(),
+            targets: vec!["shared-position".into(), "later-position".into()],
         };
-        let eligible = eligibility(&input).unwrap();
-        assert_eq!(eligible.targets.len(), 1);
-        assert_eq!(
-            eligible.targets[0].target,
-            TargetId::from("shared-position")
-        );
+        let repeat = Line {
+            id: "transposition".into(),
+            targets: vec!["shared-position".into(), "shared-position".into()],
+        };
+        let select = |routes: &[Line]| {
+            DailySession::default().select(
+                DailyContext {
+                    seed: 0,
+                    today: StudyDay(10),
+                    repertoire_limit: 10,
+                    tactics_limit: 0,
+                },
+                &candidates,
+                routes,
+                (0, 0),
+                None,
+            )
+        };
+        for selection in [
+            select(std::slice::from_ref(&main)),
+            select(&[main.clone(), repeat]),
+        ] {
+            assert_eq!(selection.outstanding, 1);
+            let next = selection.next.unwrap();
+            assert_eq!(next.activity, DailyActivity::Teach);
+            assert_eq!(next.target, TargetId::from("shared-position"));
+        }
     }
 }
